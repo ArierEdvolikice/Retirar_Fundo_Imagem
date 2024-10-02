@@ -1,0 +1,82 @@
+import os
+from tkinter import Tk, filedialog, messagebox, Button, Label, Frame
+from tkinter.ttk import Progressbar
+from rembg import remove
+from PIL import Image
+import io
+import time
+
+# Definindo as porcentagens de recorte globais
+TOP_CROP_PERCENTAGE = 0.1  # 10% da parte superior
+BOTTOM_CROP_PERCENTAGE = 0.1  # 10% da parte inferior
+
+class ImageProcessorApp:
+    def __init__(self, master):
+        self.master = master
+        master.title("Remover Fundo e Recortar Imagens")
+
+        self.label = Label(master, text="Selecione as imagens para processar:")
+        self.label.pack(pady=10)
+
+        self.select_button = Button(master, text="Selecionar Imagens", command=self.select_images)
+        self.select_button.pack(pady=10)
+
+        self.process_button = Button(master, text="Processar Imagens", command=self.process_images, state='disabled')
+        self.process_button.pack(pady=10)
+
+        self.progress = Progressbar(master, orient="horizontal", length=300, mode="determinate")
+        self.progress.pack(pady=10)
+
+        self.status_label = Label(master, text="", fg="green")
+        self.status_label.pack(pady=10)
+
+        self.image_paths = []
+
+    def select_images(self):
+        # Abrir janela de seleção de arquivos
+        self.image_paths = filedialog.askopenfilenames(
+            title="Selecione as imagens",
+            filetypes=[("Imagens", "*.png *.jpg *.jpeg *.bmp")]
+        )
+        if self.image_paths:
+            self.status_label.config(text=f"{len(self.image_paths)} imagens selecionadas.")
+            self.process_button.config(state='normal')  # Habilitar o botão de processamento
+
+    def process_images(self):
+        if self.image_paths:
+            total_images = len(self.image_paths)
+            self.progress['maximum'] = total_images
+            self.progress['value'] = 0
+
+            for idx, image_path in enumerate(self.image_paths):
+                try:
+                    with open(image_path, "rb") as input_file:
+                        input_data = input_file.read()
+
+                    output_data = remove(input_data)
+                    image = Image.open(io.BytesIO(output_data))
+
+                    width, height = image.size
+                    y1 = int(height * TOP_CROP_PERCENTAGE)
+                    y2 = int(height * (1 - BOTTOM_CROP_PERCENTAGE))
+                    CROP_BOX = (0, y1, width, y2)
+
+                    cropped_image = image.crop(CROP_BOX)
+                    output_image_path = os.path.splitext(image_path)[0] + "_no_bg_cropped.png"
+                    cropped_image.save(output_image_path)
+
+                    # Atualiza a barra de progresso
+                    self.progress['value'] += 1
+                    self.master.update_idletasks()  # Atualiza a interface
+
+                except Exception as e:
+                    messagebox.showerror("Erro", f"Erro ao processar a imagem {image_path}: {e}")
+                    continue
+
+            messagebox.showinfo("Processamento Concluído", "Todas as imagens foram processadas com sucesso!")
+            self.status_label.config(text="Processamento concluído.")
+
+if __name__ == "__main__":
+    root = Tk()
+    app = ImageProcessorApp(root)
+    root.mainloop()
