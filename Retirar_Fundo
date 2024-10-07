@@ -1,80 +1,218 @@
-import os
-from tkinter import Tk, filedialog, messagebox, Button, Label, Frame
+from tkinter import Tk, filedialog, messagebox, Button, Label, Canvas
 from tkinter.ttk import Progressbar
-from rembg import remove
-from PIL import Image
+from PIL import Image, ImageTk, ImageEnhance
 import io
-import time
-
-# Definindo as porcentagens de recorte globais
-TOP_CROP_PERCENTAGE = 0.1  # 10% da parte superior
-BOTTOM_CROP_PERCENTAGE = 0.1  # 10% da parte inferior
+from rembg import remove
+import os
+import threading
+import logging
 
 class ImageProcessorApp:
     def __init__(self, master):
         self.master = master
         master.title("Remover Fundo e Recortar Imagens")
 
-        self.label = Label(master, text="Selecione as imagens para processar:")
-        self.label.pack(pady=10)
+        # Bora preparar a interface (UI)
+        self.setup_ui()
 
-        self.select_button = Button(master, text="Selecionar Imagens", command=self.select_images)
-        self.select_button.pack(pady=10)
-
-        self.process_button = Button(master, text="Processar Imagens", command=self.process_images, state='disabled')
-        self.process_button.pack(pady=10)
-
-        self.progress = Progressbar(master, orient="horizontal", length=300, mode="determinate")
-        self.progress.pack(pady=10)
-
-        self.status_label = Label(master, text="", fg="green")
-        self.status_label.pack(pady=10)
-
+        # Variáveis
         self.image_paths = []
+        self.image = None
+        self.tk_image = None
+        self.rect = None
+        self.crop_coords = None
+        self.scale = 1
+        self.processing_thread = None
+        self.stop_processing = False
+
+        # Configuração do log dos erros
+        logging.basicConfig(filename="image_processor.log", level=logging.ERROR, 
+                            format="%(asctime)s:%(levelname)s:%(message)s")
+
+    def setup_ui(self):
+        """ Configura os elementos da interface com o usuário """
+        self.label = Label(self.master, text="Selecione as imagens para processar:")
+        self.label.grid(row=0, column=0, columnspan=2, pady=10, padx=10, sticky='nsew')
+
+        # Botão para escolher as imagens
+        self.select_button = Button(self.master, text="Selecionar Imagens", command=self.select_images)
+        self.select_button.grid(row=1, column=0, columnspan=2, pady=10, padx=10, sticky='nsew')
+
+        # Botão para processar as imagens (desativado até o usuário selecionar)
+        self.process_button = Button(self.master, text="Processar Imagens", command=self.process_images, state='disabled')
+        self.process_button.grid(row=2, column=0, columnspan=2, pady=10, padx=10, sticky='nsew')
+
+        # Botão para limpar tudo (também desativado até o usuário fazer algo)
+        self.clear_button = Button(self.master, text="Limpar", command=self.clear_all, state='disabled')
+        self.clear_button.grid(row=3, column=0, columnspan=2, pady=10, padx=10, sticky='nsew')
+
+        # Espaço (canvas) onde a imagem vai aparecer
+        self.image_canvas = Canvas(self.master, bg='white')
+        self.image_canvas.grid(row=1, column=2, rowspan=3, padx=10, pady=10, sticky='nsew')
+
+        # Barra de progresso pra mostrar o andamento do processamento
+        self.progress = Progressbar(self.master, orient="horizontal", length=300, mode="determinate")
+        self.progress.grid(row=4, column=0, columnspan=2, pady=10, padx=10, sticky='nsew')
+
+        # Um rótulo de status que vai mostrando mensagens (tipo quantas imagens foram processadas)
+        self.status_label = Label(self.master, text="", fg="green")
+        self.status_label.grid(row=5, column=0, columnspan=2, pady=10, padx=10, sticky='nsew')
 
     def select_images(self):
-        # Abrir janela de seleção de arquivos
+        """ Abre o diálogo de seleção de imagens """
+        # Abre a janela para escolher os arquivos de imagem
         self.image_paths = filedialog.askopenfilenames(
             title="Selecione as imagens",
             filetypes=[("Imagens", "*.png *.jpg *.jpeg *.bmp")]
         )
+        # Se o usuário escolher alguma imagem, ativamos os botões e mostramos quantas ele escolheu
         if self.image_paths:
             self.status_label.config(text=f"{len(self.image_paths)} imagens selecionadas.")
-            self.process_button.config(state='normal')  # Habilitar o botão de processamento
+            self.process_button.config(state='normal')
+            self.clear_button.config(state='normal')
+            # Carregamos a primeira imagem pra pré-visualização
+            self.load_image(self.image_paths[0])
+
+    def preprocess_image(self, image):
+        """ Faz um ajuste de contraste na imagem """
+        enhancer = ImageEnhance.Contrast(image)
+        return enhancer.enhance(1.5)  # Damos um boost no contraste
+
+    def load_image(self, image_path):
+        """ Carrega e ajusta a imagem no canvas """
+        try:
+            # Tenta abrir a imagem e exibi-la
+            self.image = Image.open(image_path)
+            self.display_image()
+        except Exception as e:
+            messagebox.showerror("Erro", f"Erro ao carregar a imagem: {e}")
+            logging.error(f"Erro ao carregar a imagem {image_path}: {e}")
+
+    def display_image(self):
+        """ Exibe a imagem redimensionada no Canvas """
+        # Vamos limitar a largura máxima da imagem para caber na tela
+        max_width = 400
+        img_width, img_height = self.image.size
+        self.scale = max_width / img_width  # Calculamos a escala pra manter a proporção
+        new_width = int(img_width * self.scale)
+        new_height = int(img_height * self.scale)
+
+        # Redimensiona a imagem e ajusta o tamanho do canvas
+        self.image = self.image.resize((new_width, new_height), Image.LANCZOS)
+        self.image_canvas.config(width=new_width, height=new_height)
+
+        # Converte a imagem para o formato do tkinter
+        self.tk_image = ImageTk.PhotoImage(self.image)
+        self.image_canvas.create_image(0, 0, anchor="nw", image=self.tk_image)
+
+        # Prepara para permitir que o usuário faça um corte manual
+        self.rect = self.image_canvas.create_rectangle(0, 0, 0, 0, outline='red', width=2)
+        self.image_canvas.bind("<ButtonPress-1>", self.on_press)
+        self.image_canvas.bind("<B1-Motion>", self.on_drag)
+        self.image_canvas.bind("<ButtonRelease-1>", self.on_release)
+
+    def on_press(self, event):
+        # Guarda a posição inicial quando o usuário começa a arrastar o mouse
+        self.start_x = event.x
+        self.start_y = event.y
+        self.image_canvas.coords(self.rect, self.start_x, self.start_y, self.start_x, self.start_y)
+
+    def on_drag(self, event):
+        # Enquanto o usuário arrasta, ajusta o retângulo de corte
+        self.image_canvas.coords(self.rect, self.start_x, self.start_y, event.x, event.y)
+
+    def on_release(self, event):
+        # Quando o usuário solta o botão, calcula as coordenadas do corte
+        end_x, end_y = event.x, event.y
+        self.crop_coords = self.calculate_crop_coords(self.start_x, self.start_y, end_x, end_y)
+        print(f"Corte: {self.crop_coords}")
+
+    def calculate_crop_coords(self, x1, y1, x2, y2):
+        """ Calcula as coordenadas do corte levando em conta a escala da imagem """
+        return (
+            int(min(x1, x2) / self.scale),
+            int(min(y1, y2) / self.scale),
+            int(max(x1, x2) / self.scale),
+            int(max(y1, y2) / self.scale)
+        )
 
     def process_images(self):
+        """ Inicia o processamento das imagens em uma thread separada """
+        # Se não houver corte definido, mostra um erro
+        if not self.crop_coords:
+            messagebox.showerror("Erro", "Você deve fazer o corte na pré-visualização antes de processar as imagens.")
+            return
+
+        # Se houver imagens selecionadas, começamos o processo
         if self.image_paths:
-            total_images = len(self.image_paths)
-            self.progress['maximum'] = total_images
+            self.process_button.config(state='disabled')
+            self.clear_button.config(state='disabled')
+            self.stop_processing = False
+
+            # Configura a barra de progresso com base no número de imagens
             self.progress['value'] = 0
+            self.progress['maximum'] = len(self.image_paths)
 
-            for idx, image_path in enumerate(self.image_paths):
-                try:
-                    with open(image_path, "rb") as input_file:
-                        input_data = input_file.read()
+            # Inicia o processamento em uma thread separada para não travar a interface
+            self.processing_thread = threading.Thread(target=self.process_images_in_background)
+            self.processing_thread.start()
 
-                    output_data = remove(input_data)
-                    image = Image.open(io.BytesIO(output_data))
+    def process_images_in_background(self):
+        """ Processa as imagens em segundo plano """
+        output_folder = os.path.join(os.path.dirname(self.image_paths[0]), "Imagens_Cortadas")
+        os.makedirs(output_folder, exist_ok=True)
 
-                    width, height = image.size
-                    y1 = int(height * TOP_CROP_PERCENTAGE)
-                    y2 = int(height * (1 - BOTTOM_CROP_PERCENTAGE))
-                    CROP_BOX = (0, y1, width, y2)
+        for idx, image_path in enumerate(self.image_paths, start=1):
+            if self.stop_processing:
+                break
 
-                    cropped_image = image.crop(CROP_BOX)
-                    output_image_path = os.path.splitext(image_path)[0] + "_no_bg_cropped.png"
-                    cropped_image.save(output_image_path)
+            try:
+                self.process_single_image(image_path, output_folder)
+                # Atualiza a barra de progresso à medida que as imagens são processadas
+                self.master.after(0, lambda idx=idx: self.update_progress(idx))
+            except Exception as e:
+                logging.error(f"Erro ao processar a imagem {image_path}: {e}")
+                self.master.after(0, lambda: messagebox.showerror("Erro", f"Erro ao processar a imagem {image_path}: {e}"))
 
-                    # Atualiza a barra de progresso
-                    self.progress['value'] += 1
-                    self.master.update_idletasks()  # Atualiza a interface
+        self.finalize_processing()
 
-                except Exception as e:
-                    messagebox.showerror("Erro", f"Erro ao processar a imagem {image_path}: {e}")
-                    continue
+    def process_single_image(self, image_path, output_folder):
+        """ Processa uma única imagem removendo o fundo e aplicando o corte """
+        with open(image_path, "rb") as input_file:
+            input_data = input_file.read()
 
-            messagebox.showinfo("Processamento Concluído", "Todas as imagens foram processadas com sucesso!")
-            self.status_label.config(text="Processamento concluído.")
+        output_data = remove(input_data)
+        image = Image.open(io.BytesIO(output_data))
+        preprocessed_image = self.preprocess_image(image)
+        cropped_image = preprocessed_image.crop(self.crop_coords)
+
+        output_image_path = os.path.join(output_folder, os.path.splitext(os.path.basename(image_path))[0] + "_cortada.png")
+        cropped_image.save(output_image_path)
+
+    def update_progress(self, idx):
+        """ Atualiza a barra de progresso e o status """
+        self.progress['value'] = idx
+        self.status_label.config(text=f"{idx} de {len(self.image_paths)} imagens processadas.")
+
+    def finalize_processing(self):
+        """ Finaliza o processamento e habilita os botões novamente """
+        self.process_button.config(state='normal')
+        self.clear_button.config(state='normal')
+        messagebox.showinfo("Concluído", "Processamento concluído!")
+
+    def clear_all(self):
+        """ Limpa tudo e reseta a aplicação """
+        self.image_paths = []
+        self.image = None
+        self.tk_image = None
+        self.rect = None
+        self.crop_coords = None
+        self.progress['value'] = 0
+        self.status_label.config(text="")
+        self.image_canvas.delete("all")
+        self.process_button.config(state='disabled')
+        self.clear_button.config(state='disabled')
+        self.stop_processing = True
 
 if __name__ == "__main__":
     root = Tk()
